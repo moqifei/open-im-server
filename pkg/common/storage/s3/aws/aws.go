@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	minPartSize int64 = 1024 * 1024 * 5  // 1MB
-	maxPartSize int64 = 1024 * 1024 * 1024 * 5 // 5GB
+	minPartSize int64 = 1024 * 1024 * 5          // 1MB
+	maxPartSize int64 = 1024 * 1024 * 1024 * 5    // 5GB
 	maxNumSize  int64 = 10000
 )
 
@@ -35,32 +35,30 @@ type Config struct {
 }
 
 func NewAws(conf Config) (*Aws, error) {
-	opts := []func(*aws.Config){
-		aws.WithRegion(conf.Region),
-		aws.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(conf.AccessKeyID, conf.SecretAccessKey, conf.SessionToken)),
+	// Build AWS config with optional endpoint
+	awsCfg := aws.Config{
+		Region: conf.Region,
+		Credentials: credentials.NewStaticCredentialsProvider(
+			conf.AccessKeyID,
+			conf.SecretAccessKey,
+			conf.SessionToken,
+		),
 	}
 
-	// If custom endpoint is provided, use it for S3-compatible services
+	// If custom endpoint is provided, configure it for S3-compatible services
+	var opts []func(*aws3.Options)
 	if conf.Endpoint != "" {
-		opts = append(opts, aws.WithEndpointResolverWithOptions(
-			aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{
-					URL:               conf.Endpoint,
-					SigningRegion:     conf.Region,
-					HostnameImmutable: true,
-				}, nil
-			}),
-		))
+		opts = append(opts, func(o *aws3.Options) {
+			o.BaseEndpoint = aws.String(conf.Endpoint)
+			o.UsePathStyle = true // Required for many S3-compatible services like MinIO, BOS
+		})
+	} else {
+		opts = append(opts, func(o *aws3.Options) {
+			o.UsePathStyle = false
+		})
 	}
 
-	cfg := aws.Config{}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	client := aws3.NewFromConfig(cfg, func(o *aws3.Options) {
-		o.UsePathStyle = true // Required for many S3-compatible services like MinIO, BOS
-	})
+	client := aws3.NewFromConfig(awsCfg, opts...)
 
 	return &Aws{
 		bucket: conf.Bucket,
@@ -256,9 +254,6 @@ func (a *Aws) ListUploadedParts(ctx context.Context, uploadID string, name strin
 		var val s3.UploadedPart
 		if part.PartNumber != nil {
 			val.PartNumber = int(*part.PartNumber)
-		}
-		if part.LastModified != nil {
-			val.LastModified = *part.LastModified
 		}
 		if part.LastModified != nil {
 			val.LastModified = *part.LastModified
