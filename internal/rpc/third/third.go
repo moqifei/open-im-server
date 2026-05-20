@@ -30,7 +30,7 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/database/mgo"
 	"github.com/openimsdk/open-im-server/v3/pkg/localcache"
-	"github.com/openimsdk/tools/s3/aws"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/s3/aws"
 	"github.com/openimsdk/tools/s3/kodo"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"

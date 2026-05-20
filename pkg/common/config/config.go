@@ -21,7 +21,7 @@ import (
 	"github.com/openimsdk/tools/db/mongoutil"
 	"github.com/openimsdk/tools/db/redisutil"
 	"github.com/openimsdk/tools/mq/kafka"
-	"github.com/openimsdk/tools/s3/aws"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/s3/aws"
 	"github.com/openimsdk/tools/s3/cos"
 	"github.com/openimsdk/tools/s3/kodo"
 	"github.com/openimsdk/tools/s3/minio"
@@ -368,6 +368,7 @@ type Aws struct {
 	SecretAccessKey string `yaml:"secretAccessKey"`
 	SessionToken    string `yaml:"sessionToken"`
 	PublicRead      bool   `yaml:"publicRead"`
+	Endpoint        string `yaml:"endpoint"` // Custom endpoint for S3-compatible services (e.g., Baidu BOS)
 }
 
 type User struct {
@@ -671,6 +672,7 @@ func (o *Aws) Build() *aws.Config {
 		AccessKeyID:     o.AccessKeyID,
 		SecretAccessKey: o.SecretAccessKey,
 		SessionToken:    o.SessionToken,
+		Endpoint:        o.Endpoint,
 	}
 }
 

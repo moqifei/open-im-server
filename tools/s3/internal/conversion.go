@@ -17,7 +17,7 @@ import (
 	"github.com/openimsdk/tools/db/mongoutil"
 	"github.com/openimsdk/tools/db/redisutil"
 	"github.com/openimsdk/tools/s3"
-	"github.com/openimsdk/tools/s3/aws"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/s3/aws"
 	"github.com/openimsdk/tools/s3/cos"
 	"github.com/openimsdk/tools/s3/kodo"
 	"github.com/openimsdk/tools/s3/minio"
