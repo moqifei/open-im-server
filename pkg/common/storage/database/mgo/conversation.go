@@ -33,6 +33,9 @@ import (
 
 func NewConversationMongo(db *mongo.Database) (*ConversationMgo, error) {
 	coll := db.Collection(database.ConversationName)
+	if err := dropLegacyUniqueConversationIDIndex(context.Background(), coll); err != nil {
+		return nil, err
+	}
 	_, err := coll.Indexes().CreateMany(context.Background(), []mongo.IndexModel{
 		{
 			Keys: bson.D{
@@ -51,7 +54,7 @@ func NewConversationMongo(db *mongo.Database) (*ConversationMgo, error) {
 			Keys: bson.D{
 				{Key: "conversation_id", Value: 1},
 			},
-			Options: options.Index().SetUnique(true),
+			Options: options.Index(),
 		},
 	})
 	if err != nil {
@@ -62,6 +65,20 @@ func NewConversationMongo(db *mongo.Database) (*ConversationMgo, error) {
 		return nil, err
 	}
 	return &ConversationMgo{version: version, coll: coll}, nil
+}
+
+func dropLegacyUniqueConversationIDIndex(ctx context.Context, coll *mongo.Collection) error {
+	specs, err := coll.Indexes().ListSpecifications(ctx)
+	if err != nil {
+		return errs.Wrap(err)
+	}
+	for _, spec := range specs {
+		if spec.Name == "conversation_id_1" && spec.Unique != nil && *spec.Unique {
+			_, err := coll.Indexes().DropOne(ctx, spec.Name)
+			return errs.Wrap(err)
+		}
+	}
+	return nil
 }
 
 type ConversationMgo struct {

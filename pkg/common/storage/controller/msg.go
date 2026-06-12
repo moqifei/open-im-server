@@ -80,6 +80,11 @@ type CommonMsgDatabase interface {
 	GetMaxSeqWithTime(ctx context.Context, conversationID string) (database.SeqTime, error)
 	GetCacheMaxSeqWithTime(ctx context.Context, conversationIDs []string) (map[string]database.SeqTime, error)
 
+	// GetUserConversationIDsFromSeqUser retrieves all conversationIDs that have seq records for a given userID.
+	// This is a fallback to discover conversations with pending messages that may be missing
+	// from the user's conversation table.
+	GetUserConversationIDsFromSeqUser(ctx context.Context, userID string) ([]string, error)
+
 	SetSendMsgStatus(ctx context.Context, id string, status int32) error
 	GetSendMsgStatus(ctx context.Context, id string) (int32, error)
 	SearchMessage(ctx context.Context, req *pbmsg.SearchMessageReq) (total int64, msgData []*pbmsg.SearchedMsgData, err error)
@@ -718,6 +723,10 @@ func (db *commonMsgDatabase) GetMaxSeqWithTime(ctx context.Context, conversation
 func (db *commonMsgDatabase) GetMaxSeqsWithTime(ctx context.Context, conversationIDs []string) (map[string]database.SeqTime, error) {
 	// todo: only the time in the redis cache will be taken, not the message time
 	return db.seqConversation.GetMaxSeqsWithTime(ctx, conversationIDs)
+}
+
+func (db *commonMsgDatabase) GetUserConversationIDsFromSeqUser(ctx context.Context, userID string) ([]string, error) {
+	return db.seqUser.GetUserConversationIDs(ctx, userID)
 }
 
 func (db *commonMsgDatabase) DeleteDoc(ctx context.Context, docID string) error {

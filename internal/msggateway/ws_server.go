@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,15 +17,19 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/common/webhook"
 	"github.com/openimsdk/open-im-server/v3/pkg/rpccache"
 	pbAuth "github.com/openimsdk/protocol/auth"
+	"github.com/openimsdk/protocol/constant"
+	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/mcontext"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/prommetrics"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/servererrs"
-	"github.com/openimsdk/protocol/constant"
 	"github.com/openimsdk/protocol/msggateway"
 	"github.com/openimsdk/tools/discovery"
 	"github.com/openimsdk/tools/log"
+	"github.com/openimsdk/tools/utils/idutil"
+	"github.com/openimsdk/tools/utils/jsonutil"
+	"github.com/openimsdk/tools/utils/timeutil"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -69,6 +74,7 @@ type WsServer struct {
 	webhookClient *webhook.Client
 	userClient    *rpcli.UserClient
 	authClient    *rpcli.AuthClient
+	msgClient     *rpcli.MsgClient
 
 	ready atomic.Bool
 }
@@ -98,7 +104,9 @@ func (ws *WsServer) SetDiscoveryRegistry(ctx context.Context, disCov discovery.C
 	}
 	ws.userClient = rpcli.NewUserClient(userConn)
 	ws.authClient = rpcli.NewAuthClient(authConn)
-	ws.MessageHandler = NewGrpcHandler(ws.validate, rpcli.NewMsgClient(msgConn), rpcli.NewPushMsgServiceClient(pushConn))
+	msgClient := rpcli.NewMsgClient(msgConn)
+	ws.msgClient = msgClient
+	ws.MessageHandler = NewGrpcHandler(ws.validate, msgClient, rpcli.NewPushMsgServiceClient(pushConn))
 	ws.disCov = disCov
 
 	ws.ready.Store(true)
@@ -310,7 +318,233 @@ func (ws *WsServer) registerClient(client *Client) {
 
 	wg.Wait()
 
+	// Push a ConversationChangeNotification to trigger the SDK to sync offline messages.
+	// This ensures the user receives pending messages immediately upon login,
+	// without waiting for a new message from another user to trigger the sync.
+	go ws.pushSyncNotification(client)
+
 	log.ZDebug(client.ctx, "user online", "online user Num", ws.onlineUserNum.Load(), "online user conn Num", ws.onlineUserConnNum.Load())
+}
+
+// pushSyncNotification ensures offline messages are delivered to the client upon login.
+//
+// In K8s multi-pod deployments, there are two parallel flows on login:
+//  1. HTTP: Client calls REST API → gets conversation list → stores MaxSeq locally
+//  2. Push: registerClient sends push notification → Kafka → push service → WebSocket
+//
+// Flow 2 is async (Kafka latency) and may arrive AFTER flow 1. When it does,
+// the SDK compares server MaxSeq with locally-stored MaxSeq (already set by flow 1),
+// finds them equal, and decides "nothing to sync".
+//
+// Solution: Bypass the SDK's comparison by directly pulling and pushing pending
+// messages through the WebSocket. Use GetMaxSeq (which has fallback to seq_user table)
+// to discover ALL conversations, avoiding dependency on the conversation table
+// (which may miss conversations for the receiver).
+func (ws *WsServer) pushSyncNotification(client *Client) {
+	// Delay to ensure the client's WebSocket and SDK listeners are fully ready
+	time.Sleep(time.Millisecond * 500)
+
+	if client.closed.Load() {
+		return
+	}
+
+	ctx := mcontext.SetOperationID(context.Background(), "pushsync_"+client.UserID+"_"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	ctx = mcontext.SetOpUserID(ctx, client.UserID)
+	log.ZInfo(ctx, "[pushSyncNotification] START", "userID", client.UserID, "platformID", client.PlatformID)
+
+	// Step 1: Discover ALL conversations with pending messages.
+	// Use GetMaxSeq (which has getConversationIDsFallback to seq_user table) instead of
+	// GetConversationsHasReadAndMaxSeq, because the latter calls GetConversations() which
+	// fails entirely when any conversation record is missing (e.g., si_uid1_uid2).
+	var directPushCount int
+	if ws.msgClient != nil {
+		directPushCount = ws.tryDirectPush(ctx, client)
+	}
+
+	log.ZInfo(ctx, "[pushSyncNotification] direct push done", "userID", client.UserID, "pushedCount", directPushCount)
+
+	// Step 2: Always send the ConversationChangeNotification as an additional trigger.
+	// Even if direct push succeeded, the notification ensures the full SDK sync machinery
+	// runs, updating conversation list, unread counts, etc.
+	ws.sendConversationChangeNotification(ctx, client)
+}
+
+// tryDirectPush discovers pending offline messages using GetMaxSeq (which has
+// seq_user fallback) and pushes them directly to the client via WebSocket.
+// Returns the number of messages pushed.
+func (ws *WsServer) tryDirectPush(ctx context.Context, client *Client) int {
+	// 1a. GetMaxSeq – discovers ALL conversations including those missing from the
+	//     conversation table (via getConversationIDsFallback → seq_user MongoDB query).
+	maxSeqResp, err := ws.msgClient.GetMaxSeq(ctx, &sdkws.GetMaxSeqReq{
+		UserID: client.UserID,
+	})
+	if err != nil {
+		log.ZWarn(ctx, "[pushSyncNotification] GetMaxSeq failed", err, "userID", client.UserID)
+		return 0
+	}
+	if maxSeqResp == nil || len(maxSeqResp.MaxSeqs) == 0 {
+		log.ZInfo(ctx, "[pushSyncNotification] GetMaxSeq returned empty, no pending conversations", "userID", client.UserID)
+		return 0
+	}
+
+	log.ZInfo(ctx, "[pushSyncNotification] GetMaxSeq result",
+		"userID", client.UserID,
+		"convCount", len(maxSeqResp.MaxSeqs),
+		"maxSeqs", maxSeqResp.MaxSeqs,
+	)
+
+	// 1b. Extract conversation IDs and get hasReadSeqs
+	convIDs := make([]string, 0, len(maxSeqResp.MaxSeqs))
+	for convID := range maxSeqResp.MaxSeqs {
+		convIDs = append(convIDs, convID)
+	}
+
+	hasReadSeqs, err := ws.msgClient.GetHasReadSeqs(ctx, convIDs, client.UserID)
+	if err != nil {
+		log.ZWarn(ctx, "[pushSyncNotification] GetHasReadSeqs failed", err, "userID", client.UserID)
+		// Continue with hasReadSeq=0 for all conversations
+		hasReadSeqs = make(map[string]int64)
+	}
+
+	// 2. Build SeqRanges for conversations with pending messages.
+	//    For conversations where maxSeq > hasReadSeq, we pull [hasReadSeq+1, maxSeq]
+	//    (the truly unread range). However, when the unread range is very small (e.g.,
+	//    only 1-2 notification seqs), the client may have no content messages to display
+	//    — especially if its locally-stored syncedMaxSeqs became stale in a previous
+	//    session. To guarantee content delivery, we expand the range backwards by a
+	//    minimum window so the client always receives enough recent messages.
+	const recentMessageWindow = 50
+	var seqRanges []*sdkws.SeqRange
+	for convID, maxSeq := range maxSeqResp.MaxSeqs {
+		hasReadSeq := hasReadSeqs[convID]
+		if maxSeq > hasReadSeq {
+			begin := hasReadSeq + 1
+			// Expand backward if the unread range is smaller than the minimum window,
+			// so the client receives context content messages, not just notifications.
+			if maxSeq-begin < recentMessageWindow {
+				extendedBegin := maxSeq - recentMessageWindow
+				if extendedBegin < 1 {
+					extendedBegin = 1
+				}
+				if extendedBegin < begin {
+					begin = extendedBegin
+				}
+			}
+			seqRanges = append(seqRanges, &sdkws.SeqRange{
+				ConversationID: convID,
+				Begin:          begin,
+				End:            maxSeq,
+				Num:            maxSeq - begin + 1,
+			})
+			log.ZInfo(ctx, "[pushSyncNotification] pending seq range",
+				"userID", client.UserID,
+				"convID", convID,
+				"hasReadSeq", hasReadSeq,
+				"maxSeq", maxSeq,
+				"rangeBegin", begin,
+				"rangeEnd", maxSeq,
+			)
+		}
+	}
+
+	if len(seqRanges) == 0 {
+		log.ZInfo(ctx, "[pushSyncNotification] no pending messages found", "userID", client.UserID)
+		return 0
+	}
+
+	log.ZInfo(ctx, "[pushSyncNotification] pulling messages",
+		"userID", client.UserID,
+		"rangeCount", len(seqRanges),
+	)
+
+	// 3. Pull the actual messages
+	pullResp, err := ws.msgClient.PullMessageBySeqs(ctx, &sdkws.PullMessageBySeqsReq{
+		UserID:    client.UserID,
+		SeqRanges: seqRanges,
+	})
+	if err != nil {
+		log.ZWarn(ctx, "[pushSyncNotification] PullMessageBySeqs failed", err, "userID", client.UserID)
+		return 0
+	}
+	if pullResp == nil {
+		log.ZInfo(ctx, "[pushSyncNotification] PullMessageBySeqs returned nil", "userID", client.UserID)
+		return 0
+	}
+
+	log.ZInfo(ctx, "[pushSyncNotification] PullMessageBySeqs result",
+		"userID", client.UserID,
+		"msgConvCount", len(pullResp.Msgs),
+		"notifConvCount", len(pullResp.NotificationMsgs),
+	)
+
+	// 4. Push each message to the client
+	pushCount := 0
+	for convID, pullMsgs := range pullResp.Msgs {
+		for _, msgItem := range pullMsgs.Msgs {
+			if err := client.PushMessage(ctx, msgItem); err != nil {
+				log.ZWarn(ctx, "[pushSyncNotification] push msg failed", err,
+					"userID", client.UserID, "convID", convID, "clientMsgID", msgItem.ClientMsgID, "seq", msgItem.Seq)
+			} else {
+				pushCount++
+				log.ZDebug(ctx, "[pushSyncNotification] pushed msg",
+					"userID", client.UserID, "convID", convID, "seq", msgItem.Seq)
+			}
+		}
+	}
+	for convID, pullMsgs := range pullResp.NotificationMsgs {
+		for _, msgItem := range pullMsgs.Msgs {
+			if err := client.PushMessage(ctx, msgItem); err != nil {
+				log.ZWarn(ctx, "[pushSyncNotification] push notif msg failed", err,
+					"userID", client.UserID, "convID", convID, "clientMsgID", msgItem.ClientMsgID)
+			} else {
+				pushCount++
+			}
+		}
+	}
+
+	log.ZInfo(ctx, "[pushSyncNotification] direct push complete",
+		"userID", client.UserID,
+		"totalPushed", pushCount,
+	)
+
+	return pushCount
+}
+
+// sendConversationChangeNotification sends the generic ConversationChangeNotification
+// that triggers the SDK's sync machinery (GetMaxSeq → PullMessageBySeqs).
+func (ws *WsServer) sendConversationChangeNotification(ctx context.Context, client *Client) {
+	tips := &sdkws.ConversationUpdateTips{
+		UserID: client.UserID,
+	}
+
+	n := sdkws.NotificationElem{Detail: jsonutil.StructToJsonString(tips)}
+	content, err := json.Marshal(&n)
+	if err != nil {
+		log.ZWarn(ctx, "[pushSyncNotification] marshal notification failed", err, "userID", client.UserID)
+		return
+	}
+
+	msgData := &sdkws.MsgData{
+		SendID:      client.UserID,
+		RecvID:      client.UserID,
+		Content:     content,
+		MsgFrom:     constant.SysMsgType,
+		ContentType: constant.ConversationChangeNotification,
+		SessionType: constant.SingleChatType,
+		CreateTime:  timeutil.GetCurrentTimestampByMill(),
+		ClientMsgID: idutil.GetMsgIDByMD5(client.UserID),
+		Options: map[string]bool{
+			constant.IsHistory:    false,
+			constant.IsPersistent: false,
+			constant.IsSenderSync: false,
+		},
+	}
+
+	if err := client.PushMessage(ctx, msgData); err != nil {
+		log.ZWarn(ctx, "[pushSyncNotification] push notification failed", err, "userID", client.UserID)
+	} else {
+		log.ZInfo(ctx, "[pushSyncNotification] sent ConversationChangeNotification", "userID", client.UserID, "platformID", client.PlatformID)
+	}
 }
 
 func getRemoteAdders(client []*Client) string {

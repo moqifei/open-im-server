@@ -280,35 +280,31 @@ func (och *OnlineHistoryRedisConsumerHandler) handleMsg(ctx context.Context, key
 			userHasReadMap: userSeqMap,
 		}
 
+		switch msg.SessionType {
+		case constant.SingleChatType, constant.NotificationChatType:
+			req := &pbconv.CreateSingleChatConversationsReq{
+				RecvID:           msg.RecvID,
+				SendID:           msg.SendID,
+				ConversationID:   conversationID,
+				ConversationType: msg.SessionType,
+			}
+			if err := och.conversationClient.CreateSingleChatConversations(ctx, req); err != nil {
+				log.ZWarn(ctx, "single chat or notification create conversation error", err,
+					"conversationID", conversationID, "sessionType", msg.SessionType)
+			}
+		case constant.ReadGroupChatType:
+			userIDs, err := och.groupClient.GetGroupMemberUserIDs(ctx, msg.GroupID)
+			if err != nil {
+				log.ZWarn(ctx, "get group member ids error", err, "conversationID", conversationID)
+			} else if err := och.conversationClient.CreateGroupChatConversations(ctx, msg.GroupID, userIDs); err != nil {
+				log.ZWarn(ctx, "group chat create conversation error", err, "conversationID", conversationID)
+			}
+		}
+
 		if isNewConversation {
 			switch msg.SessionType {
 			case constant.ReadGroupChatType:
-				log.ZDebug(ctx, "group chat first create conversation", "conversationID",
-					conversationID)
-
-				userIDs, err := och.groupClient.GetGroupMemberUserIDs(ctx, msg.GroupID)
-				if err != nil {
-					log.ZWarn(ctx, "get group member ids error", err, "conversationID",
-						conversationID)
-				} else {
-					log.ZInfo(ctx, "GetGroupMemberIDs end")
-
-					if err := och.conversationClient.CreateGroupChatConversations(ctx, msg.GroupID, userIDs); err != nil {
-						log.ZWarn(ctx, "single chat first create conversation error", err,
-							"conversationID", conversationID)
-					}
-				}
 			case constant.SingleChatType, constant.NotificationChatType:
-				req := &pbconv.CreateSingleChatConversationsReq{
-					RecvID:           msg.RecvID,
-					SendID:           msg.SendID,
-					ConversationID:   conversationID,
-					ConversationType: msg.SessionType,
-				}
-				if err := och.conversationClient.CreateSingleChatConversations(ctx, req); err != nil {
-					log.ZWarn(ctx, "single chat or notification first create conversation error", err,
-						"conversationID", conversationID, "sessionType", msg.SessionType)
-				}
 			default:
 				log.ZWarn(ctx, "unknown session type", nil, "sessionType",
 					msg.SessionType)

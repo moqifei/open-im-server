@@ -17,10 +17,13 @@ package msg
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	cbapi "github.com/openimsdk/open-im-server/v3/pkg/callbackstruct"
+	"github.com/openimsdk/open-im-server/v3/pkg/util/conversationutil"
 	"github.com/openimsdk/protocol/constant"
+	"github.com/openimsdk/protocol/conversation"
 	"github.com/openimsdk/protocol/msg"
 	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/errs"
@@ -43,6 +46,10 @@ func (m *msgServer) GetConversationsHasReadAndMaxSeq(ctx context.Context, req *m
 	} else {
 		conversationIDs = req.ConversationIDs
 	}
+
+	// Fallback: query seq_user table to discover conversations that have seq records
+	// but are missing from the user's conversation table.
+	conversationIDs = m.getConversationIDsFallback(ctx, req.UserID, conversationIDs)
 
 	hasReadSeqs, err := m.MsgDatabase.GetHasReadSeqs(ctx, req.UserID, conversationIDs)
 	if err != nil {
@@ -115,9 +122,22 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 	if hasReadSeq > maxSeq {
 		return nil, errs.ErrArgs.WrapMsg("hasReadSeq must not be bigger than maxSeq")
 	}
-	conversation, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, req.ConversationID)
+	conv, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, req.ConversationID)
 	if err != nil {
-		return nil, err
+		if !errs.ErrRecordNotFound.Is(err) {
+			return nil, err
+		}
+		// Conversation not found — infer type from ID and continue
+		log.ZWarn(ctx, "MarkMsgsAsRead: conversation not found, inferring type from ID", err,
+			"conversationID", req.ConversationID, "userID", req.UserID)
+		conv = &conversation.Conversation{
+			ConversationID:   req.ConversationID,
+			ConversationType: conversationutilInferType(req.ConversationID),
+			OwnerUserID:      req.UserID,
+		}
+		if conv.ConversationType == constant.SingleChatType {
+			conv.UserID = conversationutilExtractPeerUserID(req.ConversationID, req.UserID)
+		}
 	}
 	if err := m.MsgDatabase.MarkSingleChatMsgsAsRead(ctx, req.UserID, req.ConversationID, req.Seqs); err != nil {
 		return nil, err
@@ -134,14 +154,14 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 	}
 
 	reqCallback := &cbapi.CallbackSingleMsgReadReq{
-		ConversationID: conversation.ConversationID,
+		ConversationID: conv.ConversationID,
 		UserID:         req.UserID,
 		Seqs:           req.Seqs,
-		ContentType:    conversation.ConversationType,
+		ContentType:    conv.ConversationType,
 	}
 	m.webhookAfterSingleMsgRead(ctx, &m.config.WebhooksConfig.AfterSingleMsgRead, reqCallback)
-	m.sendMarkAsReadNotification(ctx, req.ConversationID, conversation.ConversationType, req.UserID,
-		m.conversationAndGetRecvID(conversation, req.UserID), req.Seqs, hasReadSeq)
+	m.sendMarkAsReadNotification(ctx, req.ConversationID, conv.ConversationType, req.UserID,
+		m.conversationAndGetRecvID(conv, req.UserID), req.Seqs, hasReadSeq)
 	return &msg.MarkMsgsAsReadResp{}, nil
 }
 
@@ -149,9 +169,26 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
 		return nil, err
 	}
-	conversation, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, req.ConversationID)
+	conv, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, req.ConversationID)
 	if err != nil {
-		return nil, err
+		// In dual-node deployments, the conversation record may not exist yet
+		// (e.g., msgtransfer hasn't created it, or local cache has a stale negative entry).
+		// Instead of failing the entire mark-as-read operation, infer the conversation
+		// type from the conversationID prefix so that hasReadSeq can still be updated.
+		if !errs.ErrRecordNotFound.Is(err) {
+			return nil, err
+		}
+		log.ZWarn(ctx, "MarkConversationAsRead: conversation not found, inferring type from ID", err,
+			"conversationID", req.ConversationID, "userID", req.UserID)
+		conv = &conversation.Conversation{
+			ConversationID:   req.ConversationID,
+			ConversationType: conversationutilInferType(req.ConversationID),
+			OwnerUserID:      req.UserID,
+		}
+		// For single chat, extract the peer userID from the conversationID (si_uid1_uid2)
+		if conv.ConversationType == constant.SingleChatType {
+			conv.UserID = conversationutilExtractPeerUserID(req.ConversationID, req.UserID)
+		}
 	}
 	hasReadSeq, err := m.MsgDatabase.GetHasReadSeq(ctx, req.UserID, req.ConversationID)
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -160,7 +197,7 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 	var seqs []int64
 
 	log.ZDebug(ctx, "MarkConversationAsRead", "hasReadSeq", hasReadSeq, "req.HasReadSeq", req.HasReadSeq)
-	if conversation.ConversationType == constant.SingleChatType {
+	if conv.ConversationType == constant.SingleChatType {
 		for i := hasReadSeq + 1; i <= req.HasReadSeq; i++ {
 			seqs = append(seqs, i)
 		}
@@ -183,10 +220,10 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 			}
 			hasReadSeq = req.HasReadSeq
 		}
-		m.sendMarkAsReadNotification(ctx, req.ConversationID, conversation.ConversationType, req.UserID,
-			m.conversationAndGetRecvID(conversation, req.UserID), seqs, hasReadSeq)
-	} else if conversation.ConversationType == constant.ReadGroupChatType ||
-		conversation.ConversationType == constant.NotificationChatType {
+		m.sendMarkAsReadNotification(ctx, req.ConversationID, conv.ConversationType, req.UserID,
+			m.conversationAndGetRecvID(conv, req.UserID), seqs, hasReadSeq)
+	} else if conv.ConversationType == constant.ReadGroupChatType ||
+		conv.ConversationType == constant.NotificationChatType {
 		if req.HasReadSeq > hasReadSeq {
 			err = m.MsgDatabase.SetHasReadSeq(ctx, req.UserID, req.ConversationID, req.HasReadSeq)
 			if err != nil {
@@ -198,20 +235,20 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 			req.UserID, seqs, hasReadSeq)
 	}
 
-	if conversation.ConversationType == constant.SingleChatType {
+	if conv.ConversationType == constant.SingleChatType {
 		reqCall := &cbapi.CallbackSingleMsgReadReq{
-			ConversationID: conversation.ConversationID,
-			UserID:         conversation.OwnerUserID,
+			ConversationID: conv.ConversationID,
+			UserID:         conv.OwnerUserID,
 			Seqs:           req.Seqs,
-			ContentType:    conversation.ConversationType,
+			ContentType:    conv.ConversationType,
 		}
 		m.webhookAfterSingleMsgRead(ctx, &m.config.WebhooksConfig.AfterSingleMsgRead, reqCall)
-	} else if conversation.ConversationType == constant.ReadGroupChatType {
+	} else if conv.ConversationType == constant.ReadGroupChatType {
 		reqCall := &cbapi.CallbackGroupMsgReadReq{
-			SendID:       conversation.OwnerUserID,
+			SendID:       conv.OwnerUserID,
 			ReceiveID:    req.UserID,
 			UnreadMsgNum: req.HasReadSeq,
-			ContentType:  int64(conversation.ConversationType),
+			ContentType:  int64(conv.ConversationType),
 		}
 		m.webhookAfterGroupMsgRead(ctx, &m.config.WebhooksConfig.AfterGroupMsgRead, reqCall)
 	}
@@ -226,4 +263,33 @@ func (m *msgServer) sendMarkAsReadNotification(ctx context.Context, conversation
 		HasReadSeq:       hasReadSeq,
 	}
 	m.notificationSender.NotificationWithSessionType(ctx, sendID, recvID, constant.HasReadReceipt, sessionType, tips)
+}
+
+// conversationutilInferType infers the conversation type from the conversationID prefix
+// when the conversation record is not available (e.g., not yet created by msgtransfer).
+func conversationutilInferType(conversationID string) int32 {
+	switch {
+	case conversationutil.IsGroupConversationID(conversationID):
+		return constant.ReadGroupChatType
+	case conversationutil.IsNotificationConversationID(conversationID):
+		return constant.NotificationChatType
+	default:
+		// si_ prefix or unknown → treat as single chat
+		return constant.SingleChatType
+	}
+}
+
+// conversationutilExtractPeerUserID extracts the peer userID from a single chat
+// conversationID of the form "si_uid1_uid2", given one's own userID.
+func conversationutilExtractPeerUserID(conversationID string, selfUserID string) string {
+	if len(conversationID) > 3 && conversationID[:3] == "si_" {
+		parts := strings.SplitN(conversationID[3:], "_", 2)
+		if len(parts) == 2 {
+			if parts[0] == selfUserID {
+				return parts[1]
+			}
+			return parts[0]
+		}
+	}
+	return ""
 }

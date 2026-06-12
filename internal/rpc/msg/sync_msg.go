@@ -37,13 +37,17 @@ func (m *msgServer) PullMessageBySeqs(ctx context.Context, req *sdkws.PullMessag
 	resp.NotificationMsgs = make(map[string]*sdkws.PullMsgs)
 	for _, seq := range req.SeqRanges {
 		if !msgprocessor.IsNotification(seq.ConversationID) {
-			conversation, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, seq.ConversationID)
-			if err != nil {
-				log.ZError(ctx, "GetConversation error", err, "conversationID", seq.ConversationID)
-				continue
+			var userMaxSeq int64
+			if conversationutil.IsGroupConversationID(seq.ConversationID) {
+				conversation, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, seq.ConversationID)
+				if err != nil {
+					log.ZWarn(ctx, "GetConversation error, using MaxSeq=0 to pull group messages", err, "conversationID", seq.ConversationID, "userID", req.UserID)
+				} else if conversation.MaxSeq > 0 && conversation.MaxSeq < seq.End {
+					userMaxSeq = conversation.MaxSeq
+				}
 			}
 			minSeq, maxSeq, msgs, err := m.MsgDatabase.GetMsgBySeqsRange(ctx, req.UserID, seq.ConversationID,
-				seq.Begin, seq.End, seq.Num, conversation.MaxSeq)
+				seq.Begin, seq.End, seq.Num, userMaxSeq)
 			if err != nil {
 				log.ZWarn(ctx, "GetMsgBySeqsRange error", err, "conversationID", seq.ConversationID, "seq", seq)
 				continue
@@ -120,6 +124,49 @@ func (m *msgServer) GetSeqMessage(ctx context.Context, req *msg.GetSeqMessageReq
 	return resp, nil
 }
 
+// getConversationIDsFallback queries the seq_user table to discover conversations that have
+// seq records but are missing from the user's conversation table. This can happen when
+// CreateSingleChatConversations failed to create the receiver's conversation record
+// during the first message, leaving the user with pending messages they cannot discover.
+// It merges any discovered conversations into the provided list.
+func (m *msgServer) getConversationIDsFallback(ctx context.Context, userID string, conversationIDs []string) []string {
+	seqUserConversationIDs, err := m.MsgDatabase.GetUserConversationIDsFromSeqUser(ctx, userID)
+	if err != nil {
+		log.ZWarn(ctx, "getConversationIDsFallback: GetUserConversationIDsFromSeqUser error, skipping fallback", err, "userID", userID)
+		return conversationIDs
+	}
+	if len(seqUserConversationIDs) == 0 {
+		return conversationIDs
+	}
+	conversationIDSet := make(map[string]struct{}, len(conversationIDs))
+	for _, id := range conversationIDs {
+		conversationIDSet[id] = struct{}{}
+	}
+	added := 0
+	for _, id := range seqUserConversationIDs {
+		if _, ok := conversationIDSet[id]; !ok {
+			conversationIDs = append(conversationIDs, id)
+			conversationIDSet[id] = struct{}{}
+			added++
+			// Also add notification conversation ID for the missing conversation,
+			// but skip if the conversation ID itself is already a notification conversation
+			if !conversationutil.IsNotificationConversationID(id) {
+				if notifID := conversationutil.GetNotificationConversationIDByConversationID(id); notifID != "" {
+					if _, ok := conversationIDSet[notifID]; !ok {
+						conversationIDs = append(conversationIDs, notifID)
+						conversationIDSet[notifID] = struct{}{}
+						added++
+					}
+				}
+			}
+		}
+	}
+	if added > 0 {
+		log.ZInfo(ctx, "getConversationIDsFallback: discovered missing conversations from seq_user table", "userID", userID, "addedCount", added)
+	}
+	return conversationIDs
+}
+
 func (m *msgServer) GetMaxSeq(ctx context.Context, req *sdkws.GetMaxSeqReq) (*sdkws.GetMaxSeqResp, error) {
 	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
 		return nil, err
@@ -132,7 +179,10 @@ func (m *msgServer) GetMaxSeq(ctx context.Context, req *sdkws.GetMaxSeqReq) (*sd
 		conversationIDs = append(conversationIDs, conversationutil.GetNotificationConversationIDByConversationID(conversationID))
 	}
 	conversationIDs = append(conversationIDs, conversationutil.GetSelfNotificationConversationID(req.UserID))
-	log.ZDebug(ctx, "GetMaxSeq", "conversationIDs", conversationIDs)
+
+	conversationIDs = m.getConversationIDsFallback(ctx, req.UserID, conversationIDs)
+
+	log.ZInfo(ctx, "GetMaxSeq", "userID", req.UserID, "conversationIDs", conversationIDs)
 	maxSeqs, err := m.MsgDatabase.GetMaxSeqs(ctx, conversationIDs)
 	if err != nil {
 		log.ZWarn(ctx, "GetMaxSeqs error", err, "conversationIDs", conversationIDs, "maxSeqs", maxSeqs)

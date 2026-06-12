@@ -386,57 +386,67 @@ func (c *conversationServer) CreateSingleChatConversations(ctx context.Context, 
 
 	switch req.ConversationType {
 	case constant.SingleChatType:
-		// sendUser create
 		conversation.ConversationID = req.ConversationID
 		conversation.ConversationType = req.ConversationType
-		conversation.OwnerUserID = req.SendID
-		conversation.UserID = req.RecvID
-
-		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
+		conversations := []*dbModel.Conversation{
+			{
+				ConversationID:   conversation.ConversationID,
+				ConversationType: conversation.ConversationType,
+				OwnerUserID:      req.SendID,
+				UserID:           req.RecvID,
+				CreateTime:       conversation.CreateTime,
+			},
+			{
+				ConversationID:   conversation.ConversationID,
+				ConversationType: conversation.ConversationType,
+				OwnerUserID:      req.RecvID,
+				UserID:           req.SendID,
+				CreateTime:       conversation.CreateTime,
+			},
+		}
+		if err := c.createMissingSingleChatConversations(ctx, conversations); err != nil {
 			return nil, err
 		}
-
-		err := c.conversationDatabase.CreateConversation(ctx, []*dbModel.Conversation{&conversation})
-		if err != nil {
-			log.ZWarn(ctx, "create conversation failed", err, "conversation", conversation)
-		}
-
-		c.webhookAfterCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.AfterCreateSingleChatConversations, &conversation)
-
-		// recvUser create
-		conversation2 := conversation
-		conversation2.OwnerUserID = req.RecvID
-		conversation2.UserID = req.SendID
-
-		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
-			return nil, err
-		}
-
-		err = c.conversationDatabase.CreateConversation(ctx, []*dbModel.Conversation{&conversation2})
-		if err != nil {
-			log.ZWarn(ctx, "create conversation failed", err, "conversation2", conversation)
-		}
-
-		c.webhookAfterCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.AfterCreateSingleChatConversations, &conversation2)
 	case constant.NotificationChatType:
 		conversation.ConversationID = req.ConversationID
 		conversation.ConversationType = req.ConversationType
 		conversation.OwnerUserID = req.RecvID
 		conversation.UserID = req.SendID
 
-		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, &conversation); err != nil && err != servererrs.ErrCallbackContinue {
+		if err := c.createMissingSingleChatConversations(ctx, []*dbModel.Conversation{&conversation}); err != nil {
 			return nil, err
 		}
-
-		err := c.conversationDatabase.CreateConversation(ctx, []*dbModel.Conversation{&conversation})
-		if err != nil {
-			log.ZWarn(ctx, "create conversation failed", err, "conversation2", conversation)
-		}
-
-		c.webhookAfterCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.AfterCreateSingleChatConversations, &conversation)
 	}
 
 	return &pbconversation.CreateSingleChatConversationsResp{}, nil
+}
+
+func (c *conversationServer) createMissingSingleChatConversations(ctx context.Context, conversations []*dbModel.Conversation) error {
+	var missingConversations []*dbModel.Conversation
+	for _, conversation := range conversations {
+		exists, err := c.conversationDatabase.FindConversations(ctx, conversation.OwnerUserID, []string{conversation.ConversationID})
+		if err != nil {
+			return err
+		}
+		if len(exists) > 0 {
+			continue
+		}
+		if err := c.webhookBeforeCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.BeforeCreateSingleChatConversations, conversation); err != nil && err != servererrs.ErrCallbackContinue {
+			return err
+		}
+		missingConversations = append(missingConversations, conversation)
+	}
+	if len(missingConversations) == 0 {
+		return nil
+	}
+	if err := c.conversationDatabase.CreateConversation(ctx, missingConversations); err != nil {
+		log.ZError(ctx, "create missing single chat conversations failed", err, "conversations", missingConversations)
+		return err
+	}
+	for _, conversation := range missingConversations {
+		c.webhookAfterCreateSingleChatConversations(ctx, &c.config.WebhooksConfig.AfterCreateSingleChatConversations, conversation)
+	}
+	return nil
 }
 
 func (c *conversationServer) CreateGroupChatConversations(ctx context.Context, req *pbconversation.CreateGroupChatConversationsReq) (*pbconversation.CreateGroupChatConversationsResp, error) {

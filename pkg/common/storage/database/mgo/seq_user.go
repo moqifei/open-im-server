@@ -124,3 +124,17 @@ func (s *seqUserMongo) SetUserReadSeq(ctx context.Context, conversationID string
 	}
 	return s.setSeq(ctx, conversationID, userID, seq, "read_seq")
 }
+
+func (s *seqUserMongo) GetUserConversationIDs(ctx context.Context, userID string) ([]string, error) {
+	filter := bson.M{"user_id": userID}
+	opt := options.Find().SetProjection(bson.M{"_id": 0, "conversation_id": 1})
+	seqs, err := mongoutil.Find[*model.SeqUser](ctx, s.coll, filter, opt)
+	if err != nil {
+		return nil, err
+	}
+	conversationIDs := make([]string, 0, len(seqs))
+	for _, seq := range seqs {
+		conversationIDs = append(conversationIDs, seq.ConversationID)
+	}
+	return conversationIDs, nil
+}

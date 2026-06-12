@@ -182,3 +182,7 @@ func (r *readSeqModel) UnmarshalJSON(bytes []byte) (err error) {
 func (r *readSeqModel) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.FormatInt(r.Seq, 10)), nil
 }
+
+func (s *seqUserCacheRedis) GetUserConversationIDs(ctx context.Context, userID string) ([]string, error) {
+	return s.mgo.GetUserConversationIDs(ctx, userID)
+}

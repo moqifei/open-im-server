@@ -13,4 +13,6 @@ type SeqUser interface {
 	SetUserMinSeqs(ctx context.Context, userID string, seqs map[string]int64) error
 	SetUserReadSeqs(ctx context.Context, userID string, seqs map[string]int64) error
 	GetUserReadSeqs(ctx context.Context, userID string, conversationIDs []string) (map[string]int64, error)
+	// GetUserConversationIDs retrieves all conversationIDs that have seq records for a given userID.
+	GetUserConversationIDs(ctx context.Context, userID string) ([]string, error)
 }
