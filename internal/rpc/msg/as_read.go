@@ -137,6 +137,8 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 		}
 		if conv.ConversationType == constant.SingleChatType {
 			conv.UserID = conversationutilExtractPeerUserID(req.ConversationID, req.UserID)
+		} else if conv.ConversationType == constant.ReadGroupChatType {
+			conv.GroupID = conversationutilExtractGroupID(req.ConversationID)
 		}
 	}
 	if err := m.MsgDatabase.MarkSingleChatMsgsAsRead(ctx, req.UserID, req.ConversationID, req.Seqs); err != nil {
@@ -160,8 +162,12 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 		ContentType:    conv.ConversationType,
 	}
 	m.webhookAfterSingleMsgRead(ctx, &m.config.WebhooksConfig.AfterSingleMsgRead, reqCallback)
-	m.sendMarkAsReadNotification(ctx, req.ConversationID, conv.ConversationType, req.UserID,
-		m.conversationAndGetRecvID(conv, req.UserID), req.Seqs, hasReadSeq)
+	if conv.ConversationType == constant.ReadGroupChatType {
+		m.sendGroupMarkAsReadNotifications(ctx, req.ConversationID, req.UserID, req.Seqs, hasReadSeq)
+	} else {
+		m.sendMarkAsReadNotification(ctx, req.ConversationID, conv.ConversationType, req.UserID,
+			m.conversationAndGetRecvID(conv, req.UserID), req.Seqs, hasReadSeq)
+	}
 	return &msg.MarkMsgsAsReadResp{}, nil
 }
 
@@ -188,6 +194,8 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 		// For single chat, extract the peer userID from the conversationID (si_uid1_uid2)
 		if conv.ConversationType == constant.SingleChatType {
 			conv.UserID = conversationutilExtractPeerUserID(req.ConversationID, req.UserID)
+		} else if conv.ConversationType == constant.ReadGroupChatType {
+			conv.GroupID = conversationutilExtractGroupID(req.ConversationID)
 		}
 	}
 	hasReadSeq, err := m.MsgDatabase.GetHasReadSeq(ctx, req.UserID, req.ConversationID)
@@ -224,6 +232,7 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 			m.conversationAndGetRecvID(conv, req.UserID), seqs, hasReadSeq)
 	} else if conv.ConversationType == constant.ReadGroupChatType ||
 		conv.ConversationType == constant.NotificationChatType {
+		prevHasReadSeq := hasReadSeq
 		if req.HasReadSeq > hasReadSeq {
 			err = m.MsgDatabase.SetHasReadSeq(ctx, req.UserID, req.ConversationID, req.HasReadSeq)
 			if err != nil {
@@ -231,8 +240,20 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 			}
 			hasReadSeq = req.HasReadSeq
 		}
-		m.sendMarkAsReadNotification(ctx, req.ConversationID, constant.SingleChatType, req.UserID,
-			req.UserID, seqs, hasReadSeq)
+		if conv.ConversationType == constant.ReadGroupChatType {
+			for i := prevHasReadSeq + 1; i <= req.HasReadSeq; i++ {
+				seqs = append(seqs, i)
+			}
+			for _, seq := range req.Seqs {
+				if !datautil.Contain(seq, seqs...) {
+					seqs = append(seqs, seq)
+				}
+			}
+			m.sendGroupMarkAsReadNotifications(ctx, req.ConversationID, req.UserID, seqs, hasReadSeq)
+		} else {
+			m.sendMarkAsReadNotification(ctx, req.ConversationID, constant.SingleChatType, req.UserID,
+				req.UserID, seqs, hasReadSeq)
+		}
 	}
 
 	if conv.ConversationType == constant.SingleChatType {
@@ -265,6 +286,30 @@ func (m *msgServer) sendMarkAsReadNotification(ctx context.Context, conversation
 	m.notificationSender.NotificationWithSessionType(ctx, sendID, recvID, constant.HasReadReceipt, sessionType, tips)
 }
 
+func (m *msgServer) sendGroupMarkAsReadNotifications(ctx context.Context, conversationID, readerUserID string, seqs []int64, hasReadSeq int64) {
+	if len(seqs) == 0 {
+		return
+	}
+	_, _, msgs, err := m.MsgDatabase.GetMsgBySeqs(ctx, readerUserID, conversationID, seqs)
+	if err != nil {
+		log.ZWarn(ctx, "sendGroupMarkAsReadNotifications: get messages by seqs failed", err,
+			"conversationID", conversationID, "readerUserID", readerUserID, "seqs", seqs)
+		groupID := conversationutilExtractGroupID(conversationID)
+		m.sendMarkAsReadNotification(ctx, conversationID, constant.ReadGroupChatType, readerUserID, groupID, seqs, hasReadSeq)
+		return
+	}
+	senderSeqs := make(map[string][]int64)
+	for _, msgData := range msgs {
+		if msgData == nil || msgData.SendID == "" || msgData.SendID == readerUserID || msgData.Seq <= 0 {
+			continue
+		}
+		senderSeqs[msgData.SendID] = append(senderSeqs[msgData.SendID], msgData.Seq)
+	}
+	for senderUserID, readSeqs := range senderSeqs {
+		m.sendMarkAsReadNotification(ctx, conversationID, constant.ReadGroupChatType, readerUserID, senderUserID, readSeqs, hasReadSeq)
+	}
+}
+
 // conversationutilInferType infers the conversation type from the conversationID prefix
 // when the conversation record is not available (e.g., not yet created by msgtransfer).
 func conversationutilInferType(conversationID string) int32 {
@@ -292,4 +337,15 @@ func conversationutilExtractPeerUserID(conversationID string, selfUserID string)
 		}
 	}
 	return ""
+}
+
+func conversationutilExtractGroupID(conversationID string) string {
+	switch {
+	case strings.HasPrefix(conversationID, "sg_"):
+		return strings.TrimPrefix(conversationID, "sg_")
+	case strings.HasPrefix(conversationID, "g_"):
+		return strings.TrimPrefix(conversationID, "g_")
+	default:
+		return ""
+	}
 }

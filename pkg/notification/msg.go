@@ -17,6 +17,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -231,6 +232,11 @@ func (s *NotificationSender) send(ctx context.Context, sendID, recvID string, co
 	msg.SessionType = sessionType
 	if msg.SessionType == constant.ReadGroupChatType {
 		msg.GroupID = recvID
+		if contentType == constant.HasReadReceipt {
+			if tips, ok := m.(*sdkws.MarkAsReadTips); ok {
+				msg.GroupID = extractGroupIDFromConversationID(tips.ConversationID)
+			}
+		}
 	}
 	msg.CreateTime = timeutil.GetCurrentTimestampByMill()
 	msg.ClientMsgID = idutil.GetMsgIDByMD5(sendID)
@@ -250,6 +256,17 @@ func (s *NotificationSender) send(ctx context.Context, sendID, recvID string, co
 	_, err = s.sendMsg(ctx, &req)
 	if err != nil {
 		log.ZWarn(ctx, "SendMsg failed", err, "req", req.String())
+	}
+}
+
+func extractGroupIDFromConversationID(conversationID string) string {
+	switch {
+	case strings.HasPrefix(conversationID, "sg_"):
+		return strings.TrimPrefix(conversationID, "sg_")
+	case strings.HasPrefix(conversationID, "g_"):
+		return strings.TrimPrefix(conversationID, "g_")
+	default:
+		return conversationID
 	}
 }
 

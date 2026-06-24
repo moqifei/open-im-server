@@ -225,6 +225,9 @@ func (c *ConsumerHandler) Push2Group(ctx context.Context, groupID string, msg *s
 		log.ZInfo(ctx, "Get group msg from msg_transfer and push msg end", "msg", msg.String(), "groupID", groupID, "time cost", t)
 	}(time.Now())
 	var pushToUserIDs []string
+	if msg.ContentType == constant.HasReadReceipt && msg.RecvID != "" && msg.RecvID != groupID {
+		pushToUserIDs = []string{msg.RecvID}
+	}
 	if err = c.webhookBeforeGroupOnlinePush(ctx, &c.config.WebhooksConfig.BeforeGroupOnlinePush, groupID, msg,
 		&pushToUserIDs); err != nil {
 		return err

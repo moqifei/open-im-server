@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -79,12 +80,21 @@ func getMsgDataDescriptor() []protoreflect.FieldDescriptor {
 type MessageApi struct {
 	Client        msg.MsgClient
 	userClient    *rpcli.UserClient
+	groupClient   *rpcli.GroupClient
+	msgClient     *rpcli.MsgClient
 	imAdminUserID []string
 	validate      *validator.Validate
 }
 
-func NewMessageApi(client msg.MsgClient, userClient *rpcli.UserClient, imAdminUserID []string) MessageApi {
-	return MessageApi{Client: client, userClient: userClient, imAdminUserID: imAdminUserID, validate: validator.New()}
+func NewMessageApi(client msg.MsgClient, userClient *rpcli.UserClient, groupClient *rpcli.GroupClient, imAdminUserID []string) MessageApi {
+	return MessageApi{
+		Client:        client,
+		userClient:    userClient,
+		groupClient:   groupClient,
+		msgClient:     &rpcli.MsgClient{MsgClient: client},
+		imAdminUserID: imAdminUserID,
+		validate:      validator.New(),
+	}
 }
 
 func (*MessageApi) SetOptions(options map[string]bool, value bool) {
@@ -171,12 +181,97 @@ func (m *MessageApi) MarkConversationAsRead(c *gin.Context) {
 	a2r.Call(c, msg.MsgClient.MarkConversationAsRead, m.Client)
 }
 
+type getGroupMessagesReadInfoReq struct {
+	ConversationID string  `json:"conversationID" binding:"required"`
+	GroupID        string  `json:"groupID"`
+	UserID         string  `json:"userID" binding:"required"`
+	Seqs           []int64 `json:"seqs" binding:"required"`
+}
+
+type groupMessageReadInfoResp struct {
+	Seq              int64    `json:"seq"`
+	HasReadCount     int      `json:"hasReadCount"`
+	UnreadCount      int      `json:"unreadCount"`
+	GroupMemberCount int      `json:"groupMemberCount"`
+	HasReadUserIDs   []string `json:"hasReadUserIDList"`
+}
+
+func (m *MessageApi) GetGroupMessagesReadInfo(c *gin.Context) {
+	var req getGroupMessagesReadInfoReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apiresp.GinError(c, errs.ErrArgs.WrapMsg(err.Error()))
+		return
+	}
+	if err := authverify.CheckAccess(c, req.UserID); err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	groupID := req.GroupID
+	if groupID == "" {
+		groupID = extractGroupIDFromConversationID(req.ConversationID)
+	}
+	if groupID == "" {
+		apiresp.GinError(c, errs.ErrArgs.WrapMsg("groupID is empty"))
+		return
+	}
+	memberIDs, err := m.groupClient.GetGroupMemberUserIDs(c, groupID)
+	if err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	readSeqs := make(map[string]int64, len(memberIDs))
+	for _, memberID := range memberIDs {
+		seqMap, err := m.msgClient.GetHasReadSeqs(c, []string{req.ConversationID}, memberID)
+		if err != nil {
+			apiresp.GinError(c, err)
+			return
+		}
+		readSeqs[memberID] = seqMap[req.ConversationID]
+	}
+	resp := make([]*groupMessageReadInfoResp, 0, len(req.Seqs))
+	for _, seq := range datautil.Distinct(req.Seqs) {
+		if seq <= 0 {
+			continue
+		}
+		item := &groupMessageReadInfoResp{
+			Seq:              seq,
+			GroupMemberCount: len(memberIDs),
+		}
+		for _, memberID := range memberIDs {
+			if memberID == req.UserID {
+				continue
+			}
+			if readSeqs[memberID] >= seq {
+				item.HasReadCount++
+				item.HasReadUserIDs = append(item.HasReadUserIDs, memberID)
+			}
+		}
+		item.UnreadCount = item.GroupMemberCount - 1 - item.HasReadCount
+		if item.UnreadCount < 0 {
+			item.UnreadCount = 0
+		}
+		resp = append(resp, item)
+	}
+	apiresp.GinSuccess(c, resp)
+}
+
 func (m *MessageApi) GetConversationsHasReadAndMaxSeq(c *gin.Context) {
 	a2r.Call(c, msg.MsgClient.GetConversationsHasReadAndMaxSeq, m.Client)
 }
 
 func (m *MessageApi) SetConversationHasReadSeq(c *gin.Context) {
 	a2r.Call(c, msg.MsgClient.SetConversationHasReadSeq, m.Client)
+}
+
+func extractGroupIDFromConversationID(conversationID string) string {
+	switch {
+	case strings.HasPrefix(conversationID, "sg_"):
+		return strings.TrimPrefix(conversationID, "sg_")
+	case strings.HasPrefix(conversationID, "g_"):
+		return strings.TrimPrefix(conversationID, "g_")
+	default:
+		return ""
+	}
 }
 
 func (m *MessageApi) ClearConversationsMsg(c *gin.Context) {
