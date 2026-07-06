@@ -54,6 +54,7 @@ deployments/openim-server/charts
 *.ori
 *.orig
 *.tmp
+*.tar
 
 ### Emacs ###
 # -*- mode: gitignore; -*-

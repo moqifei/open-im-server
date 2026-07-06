@@ -1,4 +1,4 @@
-url: http://127.0.0.1:10006/callbackExample
+url: http://openim-chat:10008/im_callback
 beforeSendSingleMsg:
   enable: false
   timeout: 5
@@ -14,7 +14,7 @@ afterUpdateUserInfoEx:
   enable: false
   timeout: 5
 afterSendSingleMsg:
-  enable: false
+  enable: true
   timeout: 5
   # Only the recvIDs specified in attentionIds will send the callback
   # if not set, all user messages will be callback
@@ -111,7 +111,7 @@ afterGroupMsgRead:
   enable: false
   timeout: 5
 afterSingleMsgRead:
-  enable: false
+  enable: true
   timeout: 5
 beforeUserRegister:
   enable: false

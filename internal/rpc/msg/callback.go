@@ -28,6 +28,7 @@ import (
 	"github.com/openimsdk/protocol/constant"
 	pbchat "github.com/openimsdk/protocol/msg"
 	"github.com/openimsdk/protocol/sdkws"
+	"github.com/openimsdk/tools/log"
 	"github.com/openimsdk/tools/mcontext"
 	"github.com/openimsdk/tools/utils/datautil"
 	"github.com/openimsdk/tools/utils/stringutil"
@@ -191,6 +192,15 @@ func (m *msgServer) webhookAfterGroupMsgRead(ctx context.Context, after *config.
 func (m *msgServer) webhookAfterSingleMsgRead(ctx context.Context, after *config.AfterConfig, req *cbapi.CallbackSingleMsgReadReq) {
 
 	req.CallbackCommand = cbapi.CallbackAfterSingleMsgReadCommand
+	log.ZInfo(ctx, "digital twin after single msg read webhook dispatch",
+		"enable", after.Enable,
+		"timeout", after.Timeout,
+		"conversationID", req.ConversationID,
+		"userID", req.UserID,
+		"seqs", req.Seqs,
+		"contentType", req.ContentType,
+		"callbackCommand", req.GetCallbackCommand(),
+	)
 
 	m.webhookClient.AsyncPost(ctx, req.GetCallbackCommand(), req, &cbapi.CallbackSingleMsgReadResp{}, after)
 

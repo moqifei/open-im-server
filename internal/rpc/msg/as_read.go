@@ -103,8 +103,25 @@ func (m *msgServer) SetConversationHasReadSeq(ctx context.Context, req *msg.SetC
 	if req.HasReadSeq > maxSeq {
 		return nil, errs.ErrArgs.WrapMsg("hasReadSeq must not be bigger than maxSeq")
 	}
+	prevHasReadSeq, err := m.MsgDatabase.GetHasReadSeq(ctx, req.UserID, req.ConversationID)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
 	if err := m.MsgDatabase.SetHasReadSeq(ctx, req.UserID, req.ConversationID, req.HasReadSeq); err != nil {
 		return nil, err
+	}
+	var seqs []int64
+	for i := prevHasReadSeq + 1; i <= req.HasReadSeq; i++ {
+		seqs = append(seqs, i)
+	}
+	if len(seqs) > 0 {
+		reqCallback := &cbapi.CallbackSingleMsgReadReq{
+			ConversationID: req.ConversationID,
+			UserID:         req.UserID,
+			Seqs:           seqs,
+			ContentType:    constant.SingleChatType,
+		}
+		m.webhookAfterSingleMsgRead(ctx, &m.config.WebhooksConfig.AfterSingleMsgRead, reqCallback)
 	}
 	m.sendMarkAsReadNotification(ctx, req.ConversationID, constant.SingleChatType, req.UserID, req.UserID, nil, req.HasReadSeq)
 	return &msg.SetConversationHasReadSeqResp{}, nil
@@ -260,7 +277,7 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 		reqCall := &cbapi.CallbackSingleMsgReadReq{
 			ConversationID: conv.ConversationID,
 			UserID:         conv.OwnerUserID,
-			Seqs:           req.Seqs,
+			Seqs:           seqs,
 			ContentType:    conv.ConversationType,
 		}
 		m.webhookAfterSingleMsgRead(ctx, &m.config.WebhooksConfig.AfterSingleMsgRead, reqCall)
