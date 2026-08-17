@@ -3,6 +3,7 @@ package msggateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -318,10 +319,16 @@ func (ws *WsServer) registerClient(client *Client) {
 
 	wg.Wait()
 
-	// Push a ConversationChangeNotification to trigger the SDK to sync offline messages.
-	// This ensures the user receives pending messages immediately upon login,
-	// without waiting for a new message from another user to trigger the sync.
-	go ws.pushSyncNotification(client)
+	// Bot 账号（platformID == 12）不主动推送历史会话。
+	// orange 侧的 openclaw-channel 是机器人客户端，重启场景不需要历史消息同步，
+	// 历史丢了即丢；server 侧推送历史会诱发 SDK 再拉取并触发补齐循环，占用磁盘。
+	// 实时消息走独立的 live PushMessage 通道，不受此跳过影响。
+	if client.PlatformID != BotPlatformID {
+		// Push a ConversationChangeNotification to trigger the SDK to sync offline messages.
+		// This ensures the user receives pending messages immediately upon login,
+		// without waiting for a new message from another user to trigger the sync.
+		go ws.pushSyncNotification(client)
+	}
 
 	log.ZDebug(client.ctx, "user online", "online user Num", ws.onlineUserNum.Load(), "online user conn Num", ws.onlineUserConnNum.Load())
 }
@@ -350,18 +357,23 @@ func (ws *WsServer) pushSyncNotification(client *Client) {
 
 	ctx := mcontext.SetOperationID(context.Background(), "pushsync_"+client.UserID+"_"+strconv.FormatInt(time.Now().UnixNano(), 10))
 	ctx = mcontext.SetOpUserID(ctx, client.UserID)
-	log.ZInfo(ctx, "[pushSyncNotification] START", "userID", client.UserID, "platformID", client.PlatformID)
 
 	// Step 1: Discover ALL conversations with pending messages.
 	// Use GetMaxSeq (which has getConversationIDsFallback to seq_user table) instead of
 	// GetConversationsHasReadAndMaxSeq, because the latter calls GetConversations() which
 	// fails entirely when any conversation record is missing (e.g., si_uid1_uid2).
+	// NOTE: tryDirectPush already short-circuits (returns 0) for users with no pending
+	// messages, so we only emit the START/done summary log when something was actually
+	// pushed. This avoids log flooding for the common case (every user gets a push
+	// notification on every (re)connect but most have nothing pending).
 	var directPushCount int
 	if ws.msgClient != nil {
 		directPushCount = ws.tryDirectPush(ctx, client)
 	}
 
-	log.ZInfo(ctx, "[pushSyncNotification] direct push done", "userID", client.UserID, "pushedCount", directPushCount)
+	if directPushCount > 0 {
+		log.ZInfo(ctx, "[pushSyncNotification] done", "userID", client.UserID, "platformID", client.PlatformID, "pushedCount", directPushCount)
+	}
 
 	// Step 2: Always send the ConversationChangeNotification as an additional trigger.
 	// Even if direct push succeeded, the notification ensures the full SDK sync machinery
@@ -387,10 +399,9 @@ func (ws *WsServer) tryDirectPush(ctx context.Context, client *Client) int {
 		return 0
 	}
 
-	log.ZInfo(ctx, "[pushSyncNotification] GetMaxSeq result",
+	log.ZDebug(ctx, "[pushSyncNotification] GetMaxSeq result",
 		"userID", client.UserID,
 		"convCount", len(maxSeqResp.MaxSeqs),
-		"maxSeqs", maxSeqResp.MaxSeqs,
 	)
 
 	// 1b. Extract conversation IDs and get hasReadSeqs
@@ -436,7 +447,7 @@ func (ws *WsServer) tryDirectPush(ctx context.Context, client *Client) int {
 				End:            maxSeq,
 				Num:            maxSeq - begin + 1,
 			})
-			log.ZInfo(ctx, "[pushSyncNotification] pending seq range",
+			log.ZDebug(ctx, "[pushSyncNotification] pending seq range",
 				"userID", client.UserID,
 				"convID", convID,
 				"hasReadSeq", hasReadSeq,
@@ -452,7 +463,7 @@ func (ws *WsServer) tryDirectPush(ctx context.Context, client *Client) int {
 		return 0
 	}
 
-	log.ZInfo(ctx, "[pushSyncNotification] pulling messages",
+	log.ZDebug(ctx, "[pushSyncNotification] pulling messages",
 		"userID", client.UserID,
 		"rangeCount", len(seqRanges),
 	)
@@ -471,35 +482,63 @@ func (ws *WsServer) tryDirectPush(ctx context.Context, client *Client) int {
 		return 0
 	}
 
-	log.ZInfo(ctx, "[pushSyncNotification] PullMessageBySeqs result",
+	log.ZDebug(ctx, "[pushSyncNotification] PullMessageBySeqs result",
 		"userID", client.UserID,
 		"msgConvCount", len(pullResp.Msgs),
 		"notifConvCount", len(pullResp.NotificationMsgs),
 	)
 
 	// 4. Push each message to the client
+	//    节流发送：每批最多 pushBatchSize 条，批间 sleep 让 loopSend goroutine 消费
+	//    writer channel(容量256)，避免离线消息量大时瞬间打满缓冲触发 ErrWriteFull。
+	//    对 ErrWriteFull 降级为丢弃(不再关连接)，仅限速告警，避免日志刷屏。
+	const pushBatchSize = 100
+	const pushBatchInterval = 500 * time.Millisecond
 	pushCount := 0
+	writeFullCount := 0
+	lastWarnTime := time.Now()
+
+	pushOne := func(convID, clientMsgID string, seq int64, isNotif bool, msgItem *sdkws.MsgData) {
+		if err := client.PushMessage(ctx, msgItem); err != nil {
+			if errors.Is(err, ErrWriteFull) {
+				// 写缓冲满：丢弃本条，累计计数，限速告警(每秒最多一条)
+				writeFullCount++
+				if time.Since(lastWarnTime) > time.Second {
+					log.ZWarn(ctx, "[pushSyncNotification] write buffer full, message dropped", err,
+						"userID", client.UserID, "convID", convID, "droppedSoFar", writeFullCount)
+					lastWarnTime = time.Now()
+				}
+			} else {
+				log.ZWarn(ctx, "[pushSyncNotification] push msg failed", err,
+					"userID", client.UserID, "convID", convID, "clientMsgID", clientMsgID, "seq", seq)
+			}
+			return
+		}
+		pushCount++
+		log.ZDebug(ctx, "[pushSyncNotification] pushed msg",
+			"userID", client.UserID, "convID", convID, "seq", seq, "isNotif", isNotif)
+	}
+
 	for convID, pullMsgs := range pullResp.Msgs {
 		for _, msgItem := range pullMsgs.Msgs {
-			if err := client.PushMessage(ctx, msgItem); err != nil {
-				log.ZWarn(ctx, "[pushSyncNotification] push msg failed", err,
-					"userID", client.UserID, "convID", convID, "clientMsgID", msgItem.ClientMsgID, "seq", msgItem.Seq)
-			} else {
-				pushCount++
-				log.ZDebug(ctx, "[pushSyncNotification] pushed msg",
-					"userID", client.UserID, "convID", convID, "seq", msgItem.Seq)
+			if pushCount > 0 && pushCount%pushBatchSize == 0 {
+				time.Sleep(pushBatchInterval)
 			}
+			pushOne(convID, msgItem.ClientMsgID, msgItem.Seq, false, msgItem)
 		}
 	}
 	for convID, pullMsgs := range pullResp.NotificationMsgs {
 		for _, msgItem := range pullMsgs.Msgs {
-			if err := client.PushMessage(ctx, msgItem); err != nil {
-				log.ZWarn(ctx, "[pushSyncNotification] push notif msg failed", err,
-					"userID", client.UserID, "convID", convID, "clientMsgID", msgItem.ClientMsgID)
-			} else {
-				pushCount++
+			if pushCount > 0 && pushCount%pushBatchSize == 0 {
+				time.Sleep(pushBatchInterval)
 			}
+			pushOne(convID, msgItem.ClientMsgID, 0, true, msgItem)
 		}
+	}
+
+	if writeFullCount > 0 {
+		log.ZWarn(ctx, "[pushSyncNotification] some messages dropped due to full write buffer", nil,
+			"userID", client.UserID, "droppedCount", writeFullCount, "pushedCount", pushCount)
 	}
 
 	log.ZInfo(ctx, "[pushSyncNotification] direct push complete",

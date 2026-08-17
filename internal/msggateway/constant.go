@@ -28,6 +28,10 @@ const (
 	BackgroundStatus        = "isBackground"
 	SendResponse            = "isMsgResp"
 	SDKType                 = "sdkType"
+	// BotPlatformID 对应 OpenIM 平台枚举中的 Bot 平台（platformID = 12）。
+	// 机器人账号在 orange 重启场景下不需要 server 主动推送历史会话，
+	// 历史消息丢即丢，因此 msggateway 对其跳过 pushSyncNotification。
+	BotPlatformID = 12
 	SDKVersion              = "sdkVersion"
 )
 

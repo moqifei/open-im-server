@@ -88,7 +88,11 @@ func (c *websocketClientConn) writeMessage(messageType int, data []byte) error {
 	case c.writer <- &websocketMessage{MessageType: messageType, Data: data}:
 		return nil
 	default:
-		return c.closeBy(ErrWriteFull)
+		// 写缓冲(writer channel, 容量256)已满：降级为丢弃本条消息并返回错误，
+		// 不再 close 连接。原先直接 closeBy(ErrWriteFull) 会在离线推送批量发送时
+		// 瞬间打满缓冲并掐断连接，导致客户端进入 CLOSE_WAIT、同步失败。
+		// 调用方应捕获此错误并视为"本次推送丢弃"，由业务层决定重试/忽略。
+		return ErrWriteFull
 	}
 }
 
