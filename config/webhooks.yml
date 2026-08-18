@@ -1,3 +1,4 @@
+# [标准化部署] 原由 docker-compose IMENV_WEBHOOKS_URL 注入，现固化到配置文件
 url: http://openim-chat:10008/im_callback
 beforeSendSingleMsg:
   enable: false

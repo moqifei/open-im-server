@@ -1,15 +1,20 @@
 # Name of the bucket in MinIO
+# [标准化部署] 原由 docker-compose IMENV_MINIO_BUCKET 注入，现固化到配置文件
 bucket: openim
 # Access key ID for MinIO authentication
+# [标准化部署] 原由 IMENV_MINIO_ACCESSKEYID 注入 (与 docker-compose 中 MINIO_ACCESS_KEY_ID 一致)
 accessKeyID: root
 # Secret access key for MinIO authentication
+# [标准化部署] 原由 IMENV_MINIO_SECRETACCESSKEY 注入 (与 docker-compose 中 MINIO_SECRET_ACCESS_KEY 一致)
 secretAccessKey: openIM123
 # Session token for MinIO authentication (optional)
 sessionToken: 
 # Internal address of the MinIO server
-internalAddress: localhost:10005
+# [标准化部署] 原由 IMENV_MINIO_INTERNALADDRESS 注入 (${MINIO_INTERNAL_ADDRESS}=minio:9000)
+internalAddress: minio:9000
 # External address of the MinIO server, accessible from outside. Supports both HTTP and HTTPS using a domain name
-externalAddress: http://external_ip:10005
+# [标准化部署] 原由 IMENV_MINIO_EXTERNALADDRESS 注入 (${MINIO_EXTERNAL_ADDRESS}=http://172.21.34.57:10005)
+externalAddress: http://172.21.34.57:10005
 # Flag to enable or disable public read access to the bucket
 publicRead: false
 

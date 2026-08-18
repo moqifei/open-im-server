@@ -16,7 +16,8 @@ prometheus:
   # It will only take effect when autoSetPorts is set to false.
   ports:
   # This address can be accessed via a browser
-  grafanaURL:
+  # [标准化部署] 原由 docker-compose IMENV_OPENIM_API_PROMETHEUS_GRAFANAURL 注入
+  grafanaURL: http://grafana:3000
 
 ratelimiter:
   # Whether to enable rate limiting

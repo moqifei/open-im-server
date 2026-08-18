@@ -1,7 +1,8 @@
 # URI for database connection, leave empty if using address and credential settings directly
 uri:
 # List of MongoDB server addresses
-address: [localhost:37017]
+# [标准化部署] 原由 docker-compose IMENV_MONGODB_ADDRESS 注入 (${MONGO_ADDRESS}=mongo:27017)
+address: [mongo:27017]
 # Name of the database
 database: openim_v3
 # Username for database authentication
@@ -20,7 +21,8 @@ mongoMode: "standalone"
 # The following configurations only take effect when mongoMode is set to "replicaSet"
 replicaSet:
   name: rs0
-  hosts: [127.0.0.1:37017, 127.0.0.1:37018, 127.0.0.1:37019]
+  # [标准化部署] 原 replicaSet hosts 误用本地端口，standalone 模式下不生效；统一为 mongo:27017 以便 replicaSet 模式也可直接用
+  hosts: [mongo:27017]
   # Read concern level: "local", "available", "majority", "linearizable", "snapshot"
   readConcern: majority
   # maximum staleness of data in seconds

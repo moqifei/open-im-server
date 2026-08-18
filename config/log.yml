@@ -5,9 +5,11 @@ rotationTime: 1
 # Number of log files to retain, default is acceptable
 remainRotationCount: 6
 # Log level settings: 3 for production environment; 6 for more verbose logging in debugging environments
-remainLogLevel: 6
+# [标准化部署] 原由 docker-compose IMENV_LOG_REMAINLOGLEVEL 注入
+remainLogLevel: 3
 # Whether to output to standard output, default is acceptable
-isStdout: false
+# [标准化部署] 原由 IMENV_LOG_ISSTDOUT 注入（k8s 部署建议 true）
+isStdout: true
 # Whether to log in JSON format, default is acceptable
 isJson: false
 # output simplify log when KeyAndValues's value len is bigger than 50 in rpc method log

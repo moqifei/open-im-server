@@ -7,7 +7,8 @@ producerAck:
 # Compression type to use (e.g., none, gzip, snappy)
 compressType: none
 # List of Kafka broker addresses
-address: [localhost:19094]
+# [标准化部署] 原由 docker-compose IMENV_KAFKA_ADDRESS 注入 (${KAFKA_ADDRESS}=kafka:9094)
+address: [kafka:9094]
 # Kafka topic for Redis integration
 toRedisTopic: toRedis
 # Kafka topic for MongoDB integration

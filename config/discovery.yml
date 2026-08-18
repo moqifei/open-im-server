@@ -1,9 +1,11 @@
 enable: etcd
 etcd:
   rootDirectory: openim
-  address: [localhost:12379]
+  # [标准化部署] 原由 docker-compose IMENV_DISCOVERY_ETCD_ADDRESS 注入，现固化到配置文件
+  address: [etcd:2379]
   ## Attention: If you set auth in etcd
   ## you must also update the username and password in Chat project.
+  # [标准化部署] 原由 IMENV_DISCOVERY_ETCD_USERNAME / IMENV_DISCOVERY_ETCD_PASSWORD 注入
   username:
   password:
 

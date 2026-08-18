@@ -1,4 +1,5 @@
-address: [localhost:16379]
+# [标准化部署] 原由 docker-compose IMENV_REDIS_ADDRESS 注入 (${REDIS_ADDRESS}=redis:6379)
+address: [redis:6379]
 username:
 password: openIM123
 # redis Mode, including "standalone","cluster","sentinel"
