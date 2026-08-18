@@ -273,7 +273,7 @@ Feel free to explore the MinIO documentation for more advanced configurations an
 | `OPENIM_CONFIG_DIR`     | `"/etc/openim"`          | Directory for OpenIM configuration files. |
 | `OPENIM_LOG_DIR`        | `"/var/log/openim"`      | Directory for OpenIM logs.                |
 | `OPENIM_SERVER_ADDRESS` | Docker Bridge Gateway IP | OpenIM server address.                    |
-| `OPENIM_WS_PORT`        | `'10001'`                | Port for OpenIM WebSocket.                |
+| `OPENIM_WS_PORT`        | `'20001'`                | Port for OpenIM WebSocket.                |
 | `API_OPENIM_PORT`       | `'10002'`                | Port for OpenIM API.                      |
 
 ###  2.4. <a name='OpenIMChatConfiguration'></a>OpenIM Chat Configuration

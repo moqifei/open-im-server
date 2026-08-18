@@ -22,4 +22,4 @@ spec:
               service:
                 name: openim-msggateway-service
                 port:
-                  number: 10001
+                  number: 20001

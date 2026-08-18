@@ -164,7 +164,7 @@ func (k *KubernetesConnManager) GetSelfConnTarget() string {
 		var selfPort int32
 
 		for _, port := range pod.Spec.Containers[0].Ports {
-			if port.ContainerPort != 10001 {
+			if port.ContainerPort != 20001 {
 				selfPort = port.ContainerPort
 				break
 			}
@@ -227,7 +227,7 @@ func (k *KubernetesConnManager) getServicePort(serviceName string) (int32, error
 
 	for _, port := range svc.Spec.Ports {
 		// fmt.Println(serviceName, " Now Get Port:", port.Port)
-		if port.Port != 10001 {
+		if port.Port != 20001 {
 			svcPort = port.Port
 			break
 		}

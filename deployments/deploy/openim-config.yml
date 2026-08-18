@@ -147,7 +147,7 @@ data:
 
     longConnSvr:
       # WebSocket listening ports, must match the number of rpc.ports
-      ports: [ 10001 ]
+      ports: [ 20001 ]
       # Maximum number of WebSocket connections
       websocketMaxConnNum: 100000
       # Maximum length of the entire WebSocket message packet
