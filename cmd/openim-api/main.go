@@ -14,10 +14,13 @@
 
 package main
 
+// 注：此处原先有 `_ "net/http/pprof"`。它只会把 pprof 注册到 http.DefaultServeMux，
+// 而本进程的 HTTP 入口是 gin（internal/api/init.go），无人服务 DefaultServeMux，
+// 因此该导入不产生任何可访问端点，属于死代码。
+// pprof 现已由 share.yml 的 debug 段统一提供（pkg/common/debug），默认关闭、只绑回环。
 import (
 	"github.com/openimsdk/open-im-server/v3/pkg/common/cmd"
 	"github.com/openimsdk/tools/system/program"
-	_ "net/http/pprof"
 )
 
 func main() {

@@ -38,6 +38,8 @@ spec:
             - name: openim-config
               mountPath: "/config"
               readOnly: true
+            - name: openim-pprof
+              mountPath: "/tmp/openim-pprof"
           ports:
             - containerPort: 10002
             - containerPort: 12002
@@ -45,3 +47,5 @@ spec:
         - name: openim-config
           configMap:
             name: openim-config
+        - name: openim-pprof
+          emptyDir: {}

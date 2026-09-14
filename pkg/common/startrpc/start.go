@@ -27,6 +27,7 @@ import (
 	"time"
 
 	conf "github.com/openimsdk/open-im-server/v3/pkg/common/config"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/debug"
 	"github.com/openimsdk/tools/utils/datautil"
 	"github.com/openimsdk/tools/utils/jsonutil"
 	"github.com/openimsdk/tools/utils/network"
@@ -171,6 +172,12 @@ func Start[T any](ctx context.Context, disc *conf.Discovery, circuitBreakerConfi
 			cancel(fmt.Errorf("signal %s", val.String()))
 		}
 	}()
+
+	// 诊断能力（pprof + 定时 heap 快照）：默认关闭，开启后只监听回环地址。
+	// 只在此处统一接入，无需改动各 cmd/*.go 的签名。
+	if shareConfig != nil {
+		debug.Start(ctx, shareConfig.Debug, index)
+	}
 
 	if prometheusListenAddr != "" {
 		options = append(

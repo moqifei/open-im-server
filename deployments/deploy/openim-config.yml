@@ -382,6 +382,21 @@ data:
       policy: 1
       maxNumOneEnd: 30
 
+    # 线上诊断（pprof + 定时 heap 快照）；默认全部关闭，开启后只监听回环地址，公网不可达。
+    # 开启后访问：kubectl port-forward pod/<pod> 16060:16060
+    # 注意：heapDump.dir 需挂 emptyDir，否则快照会落在容器可写层（不推荐）。
+    debug:
+      enable: true
+      listenIP: 127.0.0.1
+      ports: [ 16060 ]
+      heapDump:
+        enable: true
+        dir: /tmp/openim-pprof
+        interval: 5m
+        # 每种服务（进程名）各保留最近 N 份，不同服务互不挤占配额
+        keep: 6
+        gcBeforeDump: true
+
   kafka.yml: |
     # Username for authentication
     username: ''

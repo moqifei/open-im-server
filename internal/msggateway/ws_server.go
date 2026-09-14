@@ -198,8 +198,14 @@ func (ws *WsServer) Run(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() {
-		wsServer := http.Server{Addr: fmt.Sprintf(":%d", ws.port), Handler: nil}
-		http.HandleFunc("/", ws.wsHandler)
+		// 使用独立的 ServeMux，不要用 http.DefaultServeMux（Handler: nil）：
+		// 该端口（longConnSvr.ports，如 20001）是对外 WebSocket 端口且在 ingress 上暴露，
+		// 一旦有任意依赖导入 net/http/pprof（其 init() 会注册到 DefaultServeMux），
+		// /debug/pprof/* 就会被挂到公网上，泄露堆内存快照并可能被用于 DoS。
+		// 独立 mux 同时避免了重复 Run 时 http.HandleFunc 的 "multiple registrations" panic。
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", ws.wsHandler)
+		wsServer := http.Server{Addr: fmt.Sprintf(":%d", ws.port), Handler: mux}
 		go func() {
 			defer close(done)
 			<-ctx.Done()

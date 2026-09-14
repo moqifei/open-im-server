@@ -426,6 +426,39 @@ type Share struct {
 	} `yaml:"imAdminUser"`
 	MultiLogin     MultiLogin     `yaml:"multiLogin"`
 	RPCMaxBodySize MaxRequestBody `yaml:"rpcMaxBodySize"`
+	Debug          Debug          `yaml:"debug"`
+}
+
+// Debug 线上诊断开关；默认全部关闭，开启后不影响既有行为。
+// 生效位置见 pkg/common/startrpc.Start —— 所有服务统一接入。
+type Debug struct {
+	// Enable 是否开启诊断能力（pprof 端口 + 定时 heap 快照）。
+	Enable bool `yaml:"enable"`
+	// ListenIP pprof 监听地址。只应绑定回环地址（127.0.0.1），公网与集群内其他 Pod 不可达。
+	ListenIP string `yaml:"listenIP"`
+	// Ports pprof 监听端口列表，与本服务实例数一致（实际端口取 Ports[index]，
+	// 与 prometheus.ports 同语义）。留空表示不开放 pprof 端口。
+	Ports []int `yaml:"ports"`
+	// HeapDump 定时 heap 快照配置。
+	HeapDump HeapDump `yaml:"heapDump"`
+}
+
+// HeapDump 定时把 heap profile 落盘到本地目录并只保留最近 Keep 份，
+// 用于 OOM 事后分析（取"最后一次快照"离线分析，不必在生产现场抓取）。
+type HeapDump struct {
+	// Enable 是否开启定时 heap 快照。
+	Enable bool `yaml:"enable"`
+	// Dir 快照目录；建议部署时挂 emptyDir（不做持久化）。
+	// 留空则使用 ${TMPDIR}/openim-pprof。
+	Dir string `yaml:"dir"`
+	// Interval 快照间隔；留空默认 5m。
+	Interval time.Duration `yaml:"interval"`
+	// Keep 保留最近多少份；留空默认 6（5m × 6 ≈ 最近 30 分钟）。
+	Keep int `yaml:"keep"`
+	// GCBeforeDump 快照前是否先强制一次 GC。
+	// true（推荐）：inuse_space 反映真实存活对象，可直接归因；
+	// false：完全不加 GC 停顿，但快照里会混有待回收垃圾。
+	GCBeforeDump bool `yaml:"gcBeforeDump"`
 }
 
 type MaxRequestBody struct {

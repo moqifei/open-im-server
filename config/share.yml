@@ -19,3 +19,23 @@ multiLogin:
 rpcMaxBodySize:
   requestMaxBodySize:  8388608
   responseMaxBodySize: 8388608
+
+# 线上诊断（pprof + 定时 heap 快照）；默认全部关闭，开启后只监听回环地址，公网不可达。
+# 访问方式：ssh -L <port>:127.0.0.1:<port> user@node，或 kubectl port-forward pod/<pod> <port>:<port>
+debug:
+  enable: true
+  # pprof 监听地址；只应绑定回环，切勿改成 0.0.0.0
+  listenIP: 127.0.0.1
+  # pprof 端口列表，与本服务实例数一致（实际端口取 ports[index]，与 prometheus.ports 同语义）
+  ports: [ 16060 ]
+  # 定时 heap 快照：OOM 后取"最后一次快照"离线分析，无需在生产现场抓取
+  heapDump:
+    enable: true
+    # 快照目录；建议部署时挂 emptyDir（不做持久化）
+    dir: /tmp/openim-pprof
+    # 快照间隔
+    interval: 5m
+    # 只保留最近 N 份（按文件名时间戳轮转；keep 是每种服务/进程名各自保留 N 份，不同服务互不挤占）
+    keep: 6
+    # 快照前强制一次 GC：让 inuse_space 反映真实存活对象（推荐 true，代价是每间隔一次 GC）
+    gcBeforeDump: true
