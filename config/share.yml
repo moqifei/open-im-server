@@ -34,7 +34,7 @@ debug:
     # 快照目录；建议部署时挂 emptyDir（不做持久化）
     dir: /tmp/openim-pprof
     # 快照间隔
-    interval: 5m
+    interval: 10m
     # 只保留最近 N 份（按文件名时间戳轮转；keep 是每种服务/进程名各自保留 N 份，不同服务互不挤占）
     keep: 6
     # 快照前强制一次 GC：让 inuse_space 反映真实存活对象（推荐 true，代价是每间隔一次 GC）

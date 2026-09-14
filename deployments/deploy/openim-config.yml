@@ -392,7 +392,7 @@ data:
       heapDump:
         enable: true
         dir: /tmp/openim-pprof
-        interval: 5m
+        interval: 10m
         # 每种服务（进程名）各保留最近 N 份，不同服务互不挤占配额
         keep: 6
         gcBeforeDump: true
