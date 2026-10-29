@@ -245,9 +245,23 @@ func (s *authServer) ForceLogout(ctx context.Context, req *pbauth.ForceLogoutReq
 }
 
 func (s *authServer) forceKickOff(ctx context.Context, userID string, platformID int32) error {
+	m, err := s.authDatabase.GetTokensWithoutError(ctx, userID, int(platformID))
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return err
+	}
+	for k := range m {
+		m[k] = constant.KickedToken
+	}
+	if len(m) > 0 {
+		if err := s.authDatabase.SetTokenMapByUidPid(ctx, userID, int(platformID), m); err != nil {
+			return err
+		}
+	}
+
 	conns, err := s.RegisterCenter.GetConns(ctx, s.config.Discovery.RpcService.MessageGateway)
 	if err != nil {
-		return err
+		log.ZError(ctx, "forceKickOff gateway discovery failed after token revocation", err, "userID", userID, "platformID", platformID)
+		return nil
 	}
 	for _, v := range conns {
 		log.ZDebug(ctx, "forceKickOff", "userID", userID, "platformID", platformID)
@@ -256,21 +270,6 @@ func (s *authServer) forceKickOff(ctx context.Context, userID string, platformID
 		_, err := client.KickUserOffline(ctx, kickReq)
 		if err != nil {
 			log.ZError(ctx, "forceKickOff", err, "kickReq", kickReq)
-		}
-	}
-
-	m, err := s.authDatabase.GetTokensWithoutError(ctx, userID, int(platformID))
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-	for k := range m {
-		m[k] = constant.KickedToken
-		log.ZDebug(ctx, "set token map is ", "token map", m, "userID",
-			userID, "token", k)
-
-		err = s.authDatabase.SetTokenMapByUidPid(ctx, userID, int(platformID), m)
-		if err != nil {
-			return err
 		}
 	}
 	return nil
